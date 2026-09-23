@@ -7,7 +7,7 @@ using System.Windows.Input;
 using System.Windows.Media;
 using System.Threading.Tasks;
 using System.Collections.Generic;
-using System.Text.Json;
+using System.Linq;
 using System.Text.RegularExpressions;
 using System.Speech.Synthesis;
 using System.Windows.Media.Animation;
@@ -15,7 +15,6 @@ using LLama.Common;
 using LLama;
 using Whisper.net;
 using NAudio.Wave;
-
 
 namespace Kivo;
 
@@ -30,12 +29,13 @@ public partial class MainWindow : Window
     // Whisper
     private WhisperFactory _whisperFactory;
     private WhisperProcessor _whisperProcessor;
-    private WaveInEvent _waveIn;
-    private MemoryStream _audioStream;
-    private WaveFileWriter _waveWriter;
+    private WaveInEvent? _waveIn;
+    private MemoryStream? _audioStream;
+    private WaveFileWriter? _waveWriter;
     
     private SpeechSynthesizer _synthesizer;
     private bool _isListening = false;
+    private bool _isProcessing = false;
     private Storyboard _pulseAnimation;
 
     public MainWindow()
@@ -50,7 +50,6 @@ public partial class MainWindow : Window
     {
         try
         {
-            // Initialize Whisper.net
             _whisperFactory = WhisperFactory.FromPath(@"d:\kivo\models\ggml-small.en.bin");
             _whisperProcessor = _whisperFactory.CreateBuilder().WithLanguage("en").Build();
             
@@ -76,21 +75,22 @@ public partial class MainWindow : Window
     {
         if (_whisperProcessor == null)
         {
-            AddMessage("System", "Whisper AI engine failed to initialize or model is missing.");
+            AddMessage("System", "Whisper AI engine not loaded. Check models folder.");
             return;
         }
+
+        if (_isProcessing) return; // Don't allow mic during AI processing
 
         try
         {
             if (!_isListening)
             {
-                // Start Recording
                 _isListening = true;
                 MicIcon.Visibility = Visibility.Collapsed;
                 DotPulsePanel.Visibility = Visibility.Visible;
                 _pulseAnimation.Begin();
                 
-                InputBox.Text = "Listening (Click Mic again to stop)...";
+                InputBox.Text = "Listening...";
                 InputBox.IsReadOnly = true;
                 
                 _audioStream = new MemoryStream();
@@ -102,7 +102,6 @@ public partial class MainWindow : Window
             }
             else
             {
-                // Stop and Transcribe
                 _isListening = false;
                 _pulseAnimation.Stop();
                 DotPulsePanel.Visibility = Visibility.Collapsed;
@@ -110,16 +109,29 @@ public partial class MainWindow : Window
                 
                 _waveIn?.StopRecording();
                 _waveWriter?.Flush();
+
+                if (_audioStream == null || _audioStream.Length == 0)
+                {
+                    InputBox.IsReadOnly = false;
+                    InputBox.Text = "";
+                    AddMessage("System", "No audio captured.");
+                    return;
+                }
+
                 _audioStream.Position = 0;
-                
-                InputBox.Text = "Transcribing with Whisper...";
+                InputBox.Text = "Transcribing...";
+
+                // Capture references before async work
+                var stream = _audioStream;
+                var writer = _waveWriter;
+                var recorder = _waveIn;
                 
                 Task.Run(async () => 
                 {
                     string fullText = "";
                     try
                     {
-                        await foreach(var result in _whisperProcessor.ProcessAsync(_audioStream))
+                        await foreach(var result in _whisperProcessor.ProcessAsync(stream))
                         {
                             fullText += result.Text;
                         }
@@ -130,27 +142,38 @@ public partial class MainWindow : Window
                     }
                     finally
                     {
-                        _waveWriter?.Dispose();
-                        _waveIn?.Dispose();
-                        _audioStream?.Dispose();
+                        writer?.Dispose();
+                        recorder?.Dispose();
+                        stream?.Dispose();
                     }
                     
-                    string finalTrimmedText = fullText.Replace("[BLANK_AUDIO]", "").Replace("(blank audio)", "").Replace("[Silence]", "").Replace("[SILENCE]", "").Trim();
-                    // Filter out common Whisper hallucination triggers if text is basically empty
-                    if (finalTrimmedText.Length < 3 || finalTrimmedText.ToLower().Contains("subtitles by")) finalTrimmedText = "";
+                    // Clean up Whisper artifacts
+                    string cleaned = fullText
+                        .Replace("[BLANK_AUDIO]", "").Replace("(blank audio)", "")
+                        .Replace("[Silence]", "").Replace("[SILENCE]", "")
+                        .Replace("[Music]", "").Replace("[MUSIC]", "")
+                        .Trim();
+                    
+                    // Filter hallucination triggers
+                    if (cleaned.Length < 3 
+                        || cleaned.ToLower().Contains("subtitles by") 
+                        || cleaned.ToLower().Contains("thank you for watching"))
+                    {
+                        cleaned = "";
+                    }
                     
                     Dispatcher.Invoke(() => 
                     {
                         InputBox.IsReadOnly = false;
-                        if (!string.IsNullOrWhiteSpace(finalTrimmedText))
+                        if (!string.IsNullOrWhiteSpace(cleaned))
                         {
-                            InputBox.Text = finalTrimmedText;
-                            ProcessInput(finalTrimmedText);
+                            InputBox.Text = cleaned;
+                            ProcessInput(cleaned);
                         }
                         else
                         {
                             InputBox.Text = "";
-                            AddMessage("System", "Could not hear any speech clearly.");
+                            AddMessage("System", "Couldn't hear anything. Try again.");
                         }
                     });
                 });
@@ -162,7 +185,9 @@ public partial class MainWindow : Window
             _pulseAnimation.Stop();
             DotPulsePanel.Visibility = Visibility.Collapsed;
             MicIcon.Visibility = Visibility.Visible;
-            AddMessage("System", $"Microphone error: {ex.Message}");
+            InputBox.IsReadOnly = false;
+            InputBox.Text = "";
+            AddMessage("System", $"Mic error: {ex.Message}");
         }
     }
 
@@ -177,9 +202,15 @@ public partial class MainWindow : Window
         try
         {
             string modelPath = @"d:\kivo\models\Llama-3.2-1B-Instruct.gguf";
+            if (!File.Exists(modelPath))
+            {
+                Dispatcher.Invoke(() => AddMessage("System", "AI model not found. Download Llama-3.2-1B-Instruct.gguf to models folder."));
+                return;
+            }
+
             var parameters = new ModelParams(modelPath)
             {
-                ContextSize = 1024,
+                ContextSize = 2048,
                 GpuLayerCount = 0 
             };
             
@@ -188,15 +219,32 @@ public partial class MainWindow : Window
             _executor = new InteractiveExecutor(_context);
             
             _session = new ChatSession(_executor);
-            string systemPrompt = "You are Kivo, a smart Windows AI assistant. IMPORTANT: ONLY output an XML action block IF the user explicitly asks you to perform a task on their computer. If the user just says hello or asks a question, reply with normal text and DO NOT output XML. Allowed XML formats:\n<action>open_app</action><app>code</app><args>path/to/folder</args>\n<action>create_folder</action><path>path/to/folder</path>\n<action>open_folder</action><path>path/to/folder</path>\n<action>search_web</action><query>query</query>\n<action>open_url</action><url>https://example.com</url>";
+            string systemPrompt = @"You are Kivo, a helpful Windows desktop assistant. Keep replies short and direct.
+
+RULES:
+- If the user greets you or asks a question, reply with plain text. Do NOT output XML.
+- ONLY use XML action tags when the user explicitly asks to DO something on their computer.
+
+Available actions:
+<action>open_app</action><app>appname</app><args>optional args</args>
+<action>create_folder</action><path>C:\full\path</path>
+<action>open_folder</action><path>C:\full\path</path>
+<action>search_web</action><query>search terms</query>
+<action>open_url</action><url>https://example.com</url>
+
+Examples:
+User: Hello -> Hi! How can I help?
+User: Open VS Code -> <action>open_app</action><app>code</app>
+User: Search for cats -> <action>search_web</action><query>cats</query>";
+
             _session.History.AddMessage(AuthorRole.System, systemPrompt);
 
             _isAiReady = true;
-            Dispatcher.Invoke(() => Speak("Kivo is online and ready."));
+            Dispatcher.Invoke(() => Speak("Kivo is ready."));
         }
         catch (Exception ex)
         {
-            Dispatcher.Invoke(() => AddMessage("System", $"Error loading AI: {ex.Message}"));
+            Dispatcher.Invoke(() => AddMessage("System", $"AI load error: {ex.Message}"));
         }
     }
 
@@ -211,13 +259,13 @@ public partial class MainWindow : Window
         {
             this.Height = 450;
             ChatScrollViewer.Visibility = Visibility.Visible;
-            ExpandIcon.Data = Geometry.Parse("M12,8.41L16.59,13L18,11.59L12,5.58L6,11.59L7.41,13L12,8.41Z"); // Up Arrow
+            ExpandIcon.Data = Geometry.Parse("M12,8.41L16.59,13L18,11.59L12,5.58L6,11.59L7.41,13L12,8.41Z");
         }
         else
         {
             this.Height = 85;
             ChatScrollViewer.Visibility = Visibility.Collapsed;
-            ExpandIcon.Data = Geometry.Parse("M7.41,8.58L12,13.17L16.59,8.58L18,10L12,16L6,10L7.41,8.58Z"); // Down Arrow
+            ExpandIcon.Data = Geometry.Parse("M7.41,8.58L12,13.17L16.59,8.58L18,10L12,16L6,10L7.41,8.58Z");
         }
     }
 
@@ -226,7 +274,7 @@ public partial class MainWindow : Window
         if (e.Key == Key.Enter)
         {
             string text = InputBox.Text.Trim();
-            if (string.IsNullOrEmpty(text)) return;
+            if (string.IsNullOrEmpty(text) || _isProcessing) return;
             ProcessInput(text);
         }
     }
@@ -238,10 +286,11 @@ public partial class MainWindow : Window
         
         if (!_isAiReady)
         {
-            AddMessage("Kivo", "Still loading the brain... Please wait a moment.");
+            AddMessage("Kivo", "Still loading the brain... Please wait.");
             return;
         }
 
+        _isProcessing = true;
         InputBox.IsEnabled = false;
 
         try
@@ -252,20 +301,18 @@ public partial class MainWindow : Window
             var inferenceParams = new InferenceParams() 
             { 
                 MaxTokens = 256, 
-                AntiPrompts = new List<string> { "<|eot_id|>", "<|im_end|>", "User:", "\nUser:", "user\n" } 
+                AntiPrompts = new List<string> { "<|eot_id|>", "<|im_end|>", "\nUser:", "User:" } 
             };
 
-            // Recover from previous crashes if history is stuck on User
-            if (_session.History.Messages.LastOrDefault()?.AuthorRole == AuthorRole.User)
+            // Fix ChatSession crash: ensure history alternates User/Assistant
+            var lastMsg = _session.History.Messages.LastOrDefault();
+            if (lastMsg != null && lastMsg.AuthorRole == AuthorRole.User)
             {
-                _session.History.AddMessage(AuthorRole.Assistant, "[Recovered]");
+                _session.History.AddMessage(AuthorRole.Assistant, "(ok)");
             }
 
-            // Force Llama 3 assistant header to prevent repetition loops
-            string promptText = text + "<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n\n";
-
             await foreach (var token in _session.ChatAsync(
-                               new ChatHistory.Message(AuthorRole.User, promptText), 
+                               new ChatHistory.Message(AuthorRole.User, text), 
                                inferenceParams))
             {
                 response += token;
@@ -273,48 +320,61 @@ public partial class MainWindow : Window
                 ChatScrollViewer.ScrollToEnd();
             }
 
-            // Scrub XML from UI
-            string cleanText = Regex.Replace(response, @"<action>.*?</action>", "", RegexOptions.Singleline);
+            // Clean response for display
+            string cleanText = response;
+            cleanText = Regex.Replace(cleanText, @"<action>.*?</action>", "", RegexOptions.Singleline);
             cleanText = Regex.Replace(cleanText, @"<app>.*?</app>", "", RegexOptions.Singleline);
             cleanText = Regex.Replace(cleanText, @"<args>.*?</args>", "", RegexOptions.Singleline);
             cleanText = Regex.Replace(cleanText, @"<path>.*?</path>", "", RegexOptions.Singleline);
             cleanText = Regex.Replace(cleanText, @"<query>.*?</query>", "", RegexOptions.Singleline);
-            cleanText = Regex.Replace(cleanText, @"<url>.*?</url>", "", RegexOptions.Singleline).Trim();
-            if (cleanText.StartsWith("Output:")) cleanText = cleanText.Substring(7).Trim();
-            if (cleanText.StartsWith("You:")) cleanText = cleanText.Substring(4).Trim();
-            if (cleanText.EndsWith("User:")) cleanText = cleanText.Substring(0, cleanText.Length - 5).Trim();
+            cleanText = Regex.Replace(cleanText, @"<url>.*?</url>", "", RegexOptions.Singleline);
+            cleanText = Regex.Replace(cleanText, @"<\|.*?\|>", "", RegexOptions.Singleline); // Strip any leaked special tokens
+            cleanText = cleanText.Trim();
+            if (cleanText.EndsWith("User:")) cleanText = cleanText[..^5].Trim();
             
             bool hasAction = response.Contains("<action>");
             
-            if (string.IsNullOrWhiteSpace(cleanText))
+            if (hasAction && string.IsNullOrWhiteSpace(cleanText))
             {
-                replyBox.Text = "Executing action...";
+                replyBox.Text = "On it...";
             }
-            else
+            else if (!string.IsNullOrWhiteSpace(cleanText))
             {
                 replyBox.Text = cleanText;
                 if (!hasAction) Speak(cleanText); 
             }
+            else
+            {
+                replyBox.Text = "Done.";
+            }
 
-            // Check for XML actions
+            // Parse and execute XML actions
             if (hasAction)
             {
                 var actionMatch = Regex.Match(response, @"<action>(.*?)</action>", RegexOptions.Singleline);
                 if (actionMatch.Success)
                 {
                     string action = actionMatch.Groups[1].Value.Trim();
-                    string param1 = Regex.Match(response, @"<path>(.*?)</path>", RegexOptions.Singleline).Groups[1].Value?.Trim() ?? "";
-                    if (string.IsNullOrEmpty(param1)) param1 = Regex.Match(response, @"<app>(.*?)</app>", RegexOptions.Singleline).Groups[1].Value?.Trim() ?? "";
-                    if (string.IsNullOrEmpty(param1)) param1 = Regex.Match(response, @"<query>(.*?)</query>", RegexOptions.Singleline).Groups[1].Value?.Trim() ?? "";
-                    if (string.IsNullOrEmpty(param1)) param1 = Regex.Match(response, @"<url>(.*?)</url>", RegexOptions.Singleline).Groups[1].Value?.Trim() ?? "";
                     
-                    string param2 = Regex.Match(response, @"<args>(.*?)</args>", RegexOptions.Singleline).Groups[1].Value?.Trim() ?? "";
+                    // Extract params in priority order
+                    string param1 = ExtractTag(response, "path");
+                    if (string.IsNullOrEmpty(param1)) param1 = ExtractTag(response, "app");
+                    if (string.IsNullOrEmpty(param1)) param1 = ExtractTag(response, "query");
+                    if (string.IsNullOrEmpty(param1)) param1 = ExtractTag(response, "url");
+                    
+                    string param2 = ExtractTag(response, "args");
 
-                    // Prevent hallucinations
-                    if (param1 != "path/to/folder" && param1 != "query")
+                    // Skip template placeholders
+                    if (IsPlaceholder(param1))
                     {
-                        string displayParam = param1 + (string.IsNullOrEmpty(param2) ? "" : $" (Args: {param2})");
-                        var permission = MessageBox.Show($"Kivo wants to execute the following action:\n\nAction: {action}\nParameter: {displayParam}\n\nDo you want to allow this?", "Kivo Security Layer", MessageBoxButton.YesNo, MessageBoxImage.Warning);
+                        AddMessage("System", "Kivo couldn't determine what to do. Try being more specific.");
+                    }
+                    else if (!string.IsNullOrEmpty(param1))
+                    {
+                        string displayParam = param1 + (string.IsNullOrEmpty(param2) ? "" : $" ({param2})");
+                        var permission = MessageBox.Show(
+                            $"Kivo wants to:\n\nAction: {action}\nTarget: {displayParam}\n\nAllow?", 
+                            "Kivo", MessageBoxButton.YesNo, MessageBoxImage.Question);
                         
                         if (permission == MessageBoxResult.Yes)
                         {
@@ -324,8 +384,7 @@ public partial class MainWindow : Window
                         }
                         else
                         {
-                            AddMessage("System", "Action blocked by user security layer.");
-                            Speak("Action cancelled.");
+                            AddMessage("System", "Action cancelled.");
                         }
                     }
                 }
@@ -337,9 +396,25 @@ public partial class MainWindow : Window
         }
         finally
         {
+            _isProcessing = false;
             InputBox.IsEnabled = true;
             InputBox.Focus();
         }
+    }
+
+    private static string ExtractTag(string text, string tag)
+    {
+        var match = Regex.Match(text, $@"<{tag}>(.*?)</{tag}>", RegexOptions.Singleline);
+        return match.Success ? match.Groups[1].Value.Trim() : "";
+    }
+
+    private static bool IsPlaceholder(string value)
+    {
+        if (string.IsNullOrEmpty(value)) return true;
+        string lower = value.ToLower();
+        return lower == "path/to/folder" || lower == "query" || lower == "appname" 
+            || lower == "https://example.com" || lower == "search terms"
+            || lower == "optional args" || lower.Contains("example");
     }
     
     private TextBlock AddMessage(string sender, string message)
@@ -350,7 +425,9 @@ public partial class MainWindow : Window
             Padding = new Thickness(12, 8, 12, 8),
             Margin = new Thickness(0, 0, 0, 10),
             HorizontalAlignment = sender == "User" ? HorizontalAlignment.Right : HorizontalAlignment.Left,
-            Background = sender == "User" ? new SolidColorBrush((Color)ColorConverter.ConvertFromString("#B30078D7")) : new SolidColorBrush((Color)ColorConverter.ConvertFromString("#B3333333"))
+            Background = sender == "User" 
+                ? new SolidColorBrush((Color)ColorConverter.ConvertFromString("#B30078D7")) 
+                : new SolidColorBrush((Color)ColorConverter.ConvertFromString("#B3333333"))
         };
 
         var textBlock = new TextBlock
