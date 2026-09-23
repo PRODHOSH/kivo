@@ -17,21 +17,7 @@
             <DoubleAnimation Storyboard.TargetName="Dot3" Storyboard.TargetProperty="Opacity" From="0.2" To="1" Duration="0:0:0.6" BeginTime="0:0:0.4" AutoReverse="True" />
         </Storyboard>
         
-        <Style TargetType="TextBox">
-            <Setter Property="FocusVisualStyle" Value="{x:Null}"/>
-            <Setter Property="Template">
-                <Setter.Value>
-                    <ControlTemplate TargetType="TextBox">
-                        <Border Background="{TemplateBinding Background}" 
-                                BorderBrush="{TemplateBinding BorderBrush}" 
-                                BorderThickness="{TemplateBinding BorderThickness}" 
-                                CornerRadius="5">
-                            <ScrollViewer x:Name="PART_ContentHost"/>
-                        </Border>
-                    </ControlTemplate>
-                </Setter.Value>
-            </Setter>
-        </Style>
+
     </Window.Resources>
     
     <Border CornerRadius="20" Background="#F2181818" MouseLeftButtonDown="Border_MouseLeftButtonDown" BorderBrush="#33FFFFFF" BorderThickness="1" Margin="10">
@@ -52,8 +38,9 @@
                 
                 <Image Source="pack://application:,,,/spirit.png" Width="48" Height="48" Margin="10,0,5,0" VerticalAlignment="Center" Grid.Column="0" RenderOptions.BitmapScalingMode="NearestNeighbor"/>
                 
-                <TextBox x:Name="InputBox" Grid.Column="1" Height="40" Padding="10,0" VerticalContentAlignment="Center" 
-                         FontSize="15"
+                <TextBox x:Name="InputBox" Grid.Column="1" Height="36" Margin="5,0,0,0"
+                         VerticalAlignment="Center" VerticalContentAlignment="Center" 
+                         CaretBrush="White" FontSize="15"
                          ui:ControlHelper.PlaceholderText="Ask Kivo anything..." KeyDown="InputBox_KeyDown"
                          Background="Transparent" Foreground="White" BorderThickness="0" />
                 
