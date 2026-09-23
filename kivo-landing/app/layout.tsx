@@ -3,11 +3,11 @@ import './globals.css';
 
 export const metadata: Metadata = {
   metadataBase: new URL('https://kivo.prodhosh.me'),
-  title: 'Kivo — SaaS',
+  title: 'Kivo — tell your computer simply',
   description: 'Tell your computer simply. Kivo automates the boring stuff so you can do the creative stuff.',
   keywords: ['Kivo', 'SaaS', 'Automation', 'Productivity', 'Open Source'],
   openGraph: {
-    title: 'Kivo — SaaS',
+    title: 'Kivo — tell your computer simply',
     description: 'Tell your computer simply. Kivo automates the boring stuff.',
     url: 'https://kivo.prodhosh.me',
     siteName: 'Kivo',
@@ -16,10 +16,10 @@ export const metadata: Metadata = {
   },
   twitter: {
     card: 'summary_large_image',
-    title: 'Kivo — SaaS',
+    title: 'Kivo — tell your computer simply',
     description: 'Tell your computer simply. Kivo automates the boring stuff.',
   },
-  icons: { icon: '/logo-navbar.png' },
+  icons: { icon: '/spirit.png' },
 };
 
 export default function RootLayout({children}: Readonly<{children: React.ReactNode}>) {
