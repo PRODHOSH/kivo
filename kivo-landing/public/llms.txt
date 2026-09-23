@@ -1,0 +1,10 @@
+# Kivo
+
+Kivo is a powerful SaaS tool that lets you tell your computer simply what to do.
+It automates the boring stuff so you can do the creative stuff.
+
+- **Open source repo:** https://github.com/PRODHOSH/kivo
+- **Website:** https://kivo.prodhosh.me
+- **Download:** Available for Windows at https://kivo.prodhosh.me/kivo-setup.exe
+
+Contact us to team up or bring your ideas to life!
