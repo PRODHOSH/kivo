@@ -13,8 +13,7 @@ using System.Speech.Synthesis;
 using System.Windows.Media.Animation;
 using LLama.Common;
 using LLama;
-using Whisper.net;
-using NAudio.Wave;
+using System.Speech.Recognition;
 
 namespace Kivo;
 
@@ -26,12 +25,8 @@ public partial class MainWindow : Window
     private ChatSession _session;
     private bool _isAiReady = false;
     
-    // Whisper
-    private WhisperFactory _whisperFactory;
-    private WhisperProcessor _whisperProcessor;
-    private WaveInEvent _waveIn;
-    private MemoryStream _audioStream;
-    private WaveFileWriter _waveWriter;
+    // Speech Recognition
+    private SpeechRecognitionEngine _recognizer;
     
     private SpeechSynthesizer _synthesizer;
     private bool _isListening = false;
@@ -49,12 +44,32 @@ public partial class MainWindow : Window
     {
         try
         {
-            // Initialize Whisper.net
-            _whisperFactory = WhisperFactory.FromPath(@"d:\kivo\models\ggml-tiny.en.bin");
-            _whisperProcessor = _whisperFactory.CreateBuilder().WithLanguage("en").Build();
-            
             _synthesizer = new SpeechSynthesizer();
             _synthesizer.SetOutputToDefaultAudioDevice();
+            
+            _recognizer = new SpeechRecognitionEngine(new System.Globalization.CultureInfo("en-US"));
+            _recognizer.LoadGrammar(new DictationGrammar());
+            _recognizer.SetInputToDefaultAudioDevice();
+            
+            _recognizer.SpeechRecognized += (s, e) => 
+            {
+                if (e.Result != null && !string.IsNullOrWhiteSpace(e.Result.Text))
+                {
+                    Dispatcher.Invoke(() => 
+                    {
+                        InputBox.Text = e.Result.Text;
+                        ProcessInput(e.Result.Text);
+                        
+                        // Stop listening after a command is spoken
+                        _isListening = false;
+                        _pulseAnimation.Stop();
+                        DotPulsePanel.Visibility = Visibility.Collapsed;
+                        MicIcon.Visibility = Visibility.Visible;
+                        InputBox.IsReadOnly = false;
+                        _recognizer.RecognizeAsyncCancel();
+                    });
+                }
+            };
         }
         catch (Exception ex)
         {
@@ -73,9 +88,9 @@ public partial class MainWindow : Window
     
     private void MicButton_Click(object sender, RoutedEventArgs e)
     {
-        if (_whisperProcessor == null)
+        if (_recognizer == null)
         {
-            AddMessage("System", "Whisper AI engine failed to initialize or model is missing.");
+            AddMessage("System", "Speech engine failed to initialize.");
             return;
         }
 
@@ -92,12 +107,7 @@ public partial class MainWindow : Window
                 InputBox.Text = "Listening (Click Mic again to stop)...";
                 InputBox.IsReadOnly = true;
                 
-                _audioStream = new MemoryStream();
-                _waveIn = new WaveInEvent { WaveFormat = new WaveFormat(16000, 1) };
-                _waveWriter = new WaveFileWriter(_audioStream, _waveIn.WaveFormat);
-                
-                _waveIn.DataAvailable += (s, ev) => _waveWriter.Write(ev.Buffer, 0, ev.BytesRecorded);
-                _waveIn.StartRecording();
+                _recognizer.RecognizeAsync(RecognizeMode.Multiple);
             }
             else
             {
@@ -107,50 +117,10 @@ public partial class MainWindow : Window
                 DotPulsePanel.Visibility = Visibility.Collapsed;
                 MicIcon.Visibility = Visibility.Visible;
                 
-                _waveIn?.StopRecording();
-                _waveWriter?.Flush();
-                _audioStream.Position = 0;
+                InputBox.IsReadOnly = false;
+                InputBox.Text = "";
                 
-                InputBox.Text = "Transcribing with Whisper...";
-                
-                Task.Run(async () => 
-                {
-                    string fullText = "";
-                    try
-                    {
-                        await foreach(var result in _whisperProcessor.ProcessAsync(_audioStream))
-                        {
-                            fullText += result.Text;
-                        }
-                    }
-                    catch (Exception ex)
-                    {
-                        Dispatcher.Invoke(() => AddMessage("System", $"Whisper Error: {ex.Message}"));
-                    }
-                    finally
-                    {
-                        _waveWriter?.Dispose();
-                        _waveIn?.Dispose();
-                        _audioStream?.Dispose();
-                    }
-                    
-                    string finalTrimmedText = fullText.Trim();
-                    
-                    Dispatcher.Invoke(() => 
-                    {
-                        InputBox.IsReadOnly = false;
-                        if (!string.IsNullOrWhiteSpace(finalTrimmedText))
-                        {
-                            InputBox.Text = finalTrimmedText;
-                            ProcessInput(finalTrimmedText);
-                        }
-                        else
-                        {
-                            InputBox.Text = "";
-                            AddMessage("System", "Could not hear any speech.");
-                        }
-                    });
-                });
+                _recognizer.RecognizeAsyncCancel();
             }
         }
         catch (Exception ex)
@@ -185,7 +155,7 @@ public partial class MainWindow : Window
             _executor = new InteractiveExecutor(_context);
             
             _session = new ChatSession(_executor);
-            string systemPrompt = "You are Kivo, a smart local AI assistant on Windows. If the user asks you to perform an OS action (e.g. create a folder, open an app, search the web), you MUST output ONLY a valid JSON object. Supported actions:\n- {\"action\": \"create_folder\", \"path\": \"absolute_path_here\"}\n- {\"action\": \"open_folder\", \"path\": \"absolute_path_here\"}\n- {\"action\": \"open_app\", \"app\": \"app_name_or_path\"}\n- {\"action\": \"search_web\", \"query\": \"search_query\"}\nIf no action is needed, just reply normally.";
+            string systemPrompt = "You are Kivo, a smart Windows AI assistant. IMPORTANT: ONLY output a JSON action block IF the user explicitly asks you to perform a task. If the user just says hello or asks a question, reply with normal text and DO NOT output JSON. Do NOT hallucinate code. Allowed JSON format:\n{\"action\": \"open_app\", \"app\": \"code\", \"args\": \"path/to/folder\"}\n{\"action\": \"create_folder\", \"path\": \"path/to/folder\"}\n{\"action\": \"open_folder\", \"path\": \"path/to/folder\"}\n{\"action\": \"search_web\", \"query\": \"query\"}";
             _session.History.AddMessage(AuthorRole.System, systemPrompt);
 
             _isAiReady = true;
@@ -249,11 +219,11 @@ public partial class MainWindow : Window
             var inferenceParams = new InferenceParams() 
             { 
                 MaxTokens = 256, 
-                AntiPrompts = new List<string> { "<|im_end|>", "<|im_start|>", "user\n", "User:" } 
+                AntiPrompts = new List<string> { "<|im_end|>", "<|im_start|>", "user\n", "User:", "\nUser:" } 
             };
 
             await foreach (var token in _session.ChatAsync(
-                               new ChatHistory.Message(AuthorRole.User, text), 
+                               new ChatHistory.Message(AuthorRole.User, text + "\n<|im_start|>assistant\n"), 
                                inferenceParams))
             {
                 response += token;
@@ -280,7 +250,7 @@ public partial class MainWindow : Window
             }
 
             // Check for JSON actions using Regex
-            var matches = Regex.Matches(response, @"\{.*?\}", RegexOptions.Singleline);
+            var matches = Regex.Matches(response, @"\{[^{}]*\}", RegexOptions.Singleline);
             foreach (Match match in matches)
             {
                 try
@@ -293,12 +263,17 @@ public partial class MainWindow : Window
                         string param1 = root.TryGetProperty("path", out var pathProp) ? pathProp.GetString() : 
                                         root.TryGetProperty("app", out var appProp) ? appProp.GetString() : 
                                         root.TryGetProperty("query", out var queryProp) ? queryProp.GetString() : null;
-                        
-                        var permission = MessageBox.Show($"Kivo wants to execute the following action:\n\nAction: {action}\nParameter: {param1}\n\nDo you want to allow this?", "Kivo Security Layer", MessageBoxButton.YesNo, MessageBoxImage.Warning);
+                        string param2 = root.TryGetProperty("args", out var argsProp) ? argsProp.GetString() : null;
+
+                        // Prevent hallucinations
+                        if (param1 == "absolute_path_here" || param1 == "path/to/folder" || param1 == "empty_folder_path") continue;
+
+                        string displayParam = param1 + (string.IsNullOrEmpty(param2) ? "" : $" (Args: {param2})");
+                        var permission = MessageBox.Show($"Kivo wants to execute the following action:\n\nAction: {action}\nParameter: {displayParam}\n\nDo you want to allow this?", "Kivo Security Layer", MessageBoxButton.YesNo, MessageBoxImage.Warning);
                         
                         if (permission == MessageBoxResult.Yes)
                         {
-                            string result = ActionExecutor.Execute(action, param1);
+                            string result = ActionExecutor.Execute(action, param1, param2);
                             AddMessage("System", result);
                             Speak(result); 
                         }
