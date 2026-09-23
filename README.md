@@ -22,7 +22,7 @@ Kivo is a fast local desktop tool. You speak to it and it figures out what you w
 | :--- | :--- |
 | **Desktop Client** | <img src="https://cdn.jsdelivr.net/gh/devicons/devicon@latest/icons/csharp/csharp-original.svg" width="18" align="center" /> C# &nbsp;&nbsp; <img src="https://cdn.jsdelivr.net/gh/devicons/devicon@latest/icons/dotnetcore/dotnetcore-original.svg" width="18" align="center" /> .NET WPF |
 | **Landing Page** | <img src="https://cdn.jsdelivr.net/gh/devicons/devicon@latest/icons/nextjs/nextjs-original.svg" width="18" align="center" /> Next.js &nbsp;&nbsp; <img src="https://cdn.jsdelivr.net/gh/devicons/devicon@latest/icons/react/react-original.svg" width="18" align="center" /> React |
-| **Intelligence** | <img src="https://upload.wikimedia.org/wikipedia/commons/4/4d/OpenAI_Logo.svg" width="18" align="center" /> Whisper.net &nbsp;&nbsp; <img src="https://huggingface.co/front/assets/huggingface_logo-noborder.svg" width="18" align="center" /> GGUF Local LLMs |
+| **Intelligence** | 🎙️ Whisper.net &nbsp;&nbsp; <img src="https://huggingface.co/front/assets/huggingface_logo-noborder.svg" width="18" align="center" /> GGUF Local LLMs |
 
 ## Architecture
 
