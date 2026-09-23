@@ -287,39 +287,46 @@ public partial class MainWindow : Window
         {
             var replyBox = AddMessage("Kivo", "Thinking...");
 
-            // ── STEP 1: Intent classifier (stateless, fast) ──────────────────
-            // Runs a separate stateless prompt that ONLY outputs action XML or the word "none".
-            // This is completely separate from the chat session so the model stays focused.
-            // Build classifier prompt - LLM-based intent classification
-            string classifierPrompt = string.Concat(
-                "<|begin_of_text|><|start_header_id|>system<|end_header_id|>\n",
-                "You are a command intent classifier. Output ONLY valid XML action tags or the single word: none\n\n",
-                "Rules:\n",
-                "- Search/google/look up -> <action>search_web</action><query>SEARCH TERMS</query>\n",
-                "- Open website/URL -> <action>open_url</action><url>URL</url>\n",
-                "- Open app/program -> <action>open_app</action><app>APP NAME</app>\n",
-                "- Create folder -> <action>create_folder</action><path>FOLDER NAME</path>\n",
-                "- Open folder -> <action>open_folder</action><path>FOLDER PATH</path>\n",
-                "- Greetings/questions/conversation -> none\n\n",
-                "Examples:\n",
-                "User: search for cats -> <action>search_web</action><query>cats</query>\n",
-                "User: google the weather -> <action>search_web</action><query>weather</query>\n",
-                "User: open chrome and search laws of motion -> <action>search_web</action><query>laws of motion</query>\n",
-                "User: create a folder called mydocs -> <action>create_folder</action><path>mydocs</path>\n",
-                "User: open notepad -> <action>open_app</action><app>notepad</app>\n",
-                "User: open youtube.com -> <action>open_url</action><url>https://youtube.com</url>\n",
-                "User: hello -> none\n",
-                "User: what time is it -> none\n",
-                "<|eot_id|><|start_header_id|>user<|end_header_id|>\n",
-                text,
-                "<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n"
-            );
+            // ── PRE-CHECK: Extract URL if user explicitly mentions one ────────
+            // The 1B model is bad at extracting URLs reliably; we handle this deterministically.
+            string? preDetectedAction = null;
+            string? preDetectedParam = null;
+            
+            // Check for "go to X" / "navigate to X" / "open X.com" type requests
+            var urlInText = Regex.Match(text, @"(?:go\s+to|navigate\s+to|visit|open)\s+((?:https?://|www\.)\S+|\S+\.(?:com|org|io|net|co|in|uk|gov|edu)\S*)", RegexOptions.IgnoreCase);
+            if (urlInText.Success)
+            {
+                preDetectedAction = "open_url";
+                string url = urlInText.Groups[1].Value.Trim().TrimEnd('.', ',');
+                if (!url.StartsWith("http")) url = "https://" + url;
+                preDetectedParam = url;
+            }
 
+            // ── STEP 1: LLM Intent classifier (short, focused prompt) ─────────
             string intentXml = "";
-            var classifierParams = new InferenceParams { MaxTokens = 80, AntiPrompts = new List<string> { "<|eot_id|>", "\n\n", "User:" } };
-            await foreach (var tok in _classifier.InferAsync(classifierPrompt, classifierParams))
-                intentXml += tok;
-            intentXml = intentXml.Trim();
+            
+            if (preDetectedAction == null)
+            {
+                // Only run LLM classifier when we don't already know the intent
+                string classifierPrompt = string.Concat(
+                    "<|begin_of_text|><|start_header_id|>system<|end_header_id|>\n",
+                    "Classify user input. Output XML or 'none'. Examples:\n",
+                    "search for X -> <action>search_web</action><query>X</query>\n",
+                    "google X -> <action>search_web</action><query>X</query>\n",
+                    "open notepad -> <action>open_app</action><app>notepad</app>\n",
+                    "open youtube.com -> <action>open_url</action><url>https://youtube.com</url>\n",
+                    "create folder myfiles -> <action>create_folder</action><path>myfiles</path>\n",
+                    "hello / questions -> none\n",
+                    "<|eot_id|><|start_header_id|>user<|end_header_id|>\n",
+                    text,
+                    "<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n"
+                );
+
+                var classifierParams = new InferenceParams { MaxTokens = 60, AntiPrompts = new List<string> { "<|eot_id|>", "\n\n", "User:", "\nKivo:" } };
+                await foreach (var tok in _classifier.InferAsync(classifierPrompt, classifierParams))
+                    intentXml += tok;
+                intentXml = intentXml.Trim();
+            }
 
             // ── STEP 2: Chat session for conversational reply ────────────────
             string chatReply = "";
@@ -343,20 +350,31 @@ public partial class MainWindow : Window
             if (chatReply.EndsWith("User:")) chatReply = chatReply[..^5].Trim();
             replyBox.Text = string.IsNullOrWhiteSpace(chatReply) ? "Got it!" : chatReply;
 
-            // ── STEP 3: Execute intent if classifier found one ───────────────
-            if (!string.IsNullOrWhiteSpace(intentXml) && intentXml != "none" && intentXml.Contains("<action>"))
-            {
-                string action = ExtractTag(intentXml, "action");
-                string param1 = ExtractTag(intentXml, "query");
-                if (string.IsNullOrEmpty(param1)) param1 = ExtractTag(intentXml, "url");
-                if (string.IsNullOrEmpty(param1)) param1 = ExtractTag(intentXml, "app");
-                if (string.IsNullOrEmpty(param1)) param1 = ExtractTag(intentXml, "path");
-                string param2 = ExtractTag(intentXml, "args");
+            // ── STEP 3: Execute intent ───────────────────────────────────────
+            string finalAction = "";
+            string finalParam = "";
+            string finalParam2 = "";
 
-                if (!string.IsNullOrEmpty(action) && !string.IsNullOrEmpty(param1) && !IsPlaceholder(param1))
-                {
-                    AskPermissionAndExecute(action, param1, param2);
-                }
+            if (preDetectedAction != null && preDetectedParam != null)
+            {
+                // URL was detected directly from user text — most reliable
+                finalAction = preDetectedAction;
+                finalParam = preDetectedParam;
+            }
+            else if (!string.IsNullOrWhiteSpace(intentXml) && intentXml != "none" && intentXml.Contains("<action>"))
+            {
+                // LLM classifier found an action
+                finalAction = ExtractTag(intentXml, "action");
+                finalParam = ExtractTag(intentXml, "query");
+                if (string.IsNullOrEmpty(finalParam)) finalParam = ExtractTag(intentXml, "url");
+                if (string.IsNullOrEmpty(finalParam)) finalParam = ExtractTag(intentXml, "app");
+                if (string.IsNullOrEmpty(finalParam)) finalParam = ExtractTag(intentXml, "path");
+                finalParam2 = ExtractTag(intentXml, "args");
+            }
+
+            if (!string.IsNullOrEmpty(finalAction) && !string.IsNullOrEmpty(finalParam) && !IsPlaceholder(finalParam))
+            {
+                AskPermissionAndExecute(finalAction, finalParam, finalParam2);
             }
         }
         catch (Exception ex)
