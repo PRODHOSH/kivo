@@ -56,10 +56,13 @@ namespace Kivo
                         return $"Searched the web for '{param1}'.";
                     
                     case "open_url":
+                    case "open_webpage":
+                    case "open_website":
+                    case "open_browser":
                         if (string.IsNullOrEmpty(param1)) return "Error: URL not provided.";
                         Process.Start(new ProcessStartInfo
                         {
-                            FileName = param1,
+                            FileName = param1.StartsWith("http") ? param1 : $"https://www.google.com/search?q={Uri.EscapeDataString(param1)}",
                             UseShellExecute = true
                         });
                         return $"Opened {param1}.";

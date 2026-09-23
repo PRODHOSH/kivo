@@ -188,7 +188,7 @@ public partial class MainWindow : Window
             _executor = new InteractiveExecutor(_context);
             
             _session = new ChatSession(_executor);
-            string systemPrompt = "You are Kivo, a smart Windows AI assistant. IMPORTANT: ONLY output an XML action block IF the user explicitly asks you to perform a task on their computer. If the user just says hello or asks a question, reply with normal text and DO NOT output XML. Allowed XML formats:\n<action>open_app</action><app>code</app><args>path/to/folder</args>\n<action>create_folder</action><path>path/to/folder</path>\n<action>open_folder</action><path>path/to/folder</path>\n<action>search_web</action><query>query</query>";
+            string systemPrompt = "You are Kivo, a smart Windows AI assistant. IMPORTANT: ONLY output an XML action block IF the user explicitly asks you to perform a task on their computer. If the user just says hello or asks a question, reply with normal text and DO NOT output XML. Allowed XML formats:\n<action>open_app</action><app>code</app><args>path/to/folder</args>\n<action>create_folder</action><path>path/to/folder</path>\n<action>open_folder</action><path>path/to/folder</path>\n<action>search_web</action><query>query</query>\n<action>open_url</action><url>https://example.com</url>";
             _session.History.AddMessage(AuthorRole.System, systemPrompt);
 
             _isAiReady = true;
@@ -252,11 +252,11 @@ public partial class MainWindow : Window
             var inferenceParams = new InferenceParams() 
             { 
                 MaxTokens = 256, 
-                AntiPrompts = new List<string> { "<|im_end|>", "<|im_start|>", "user\n", "User:", "\nUser:" } 
+                AntiPrompts = new List<string> { "<|eot_id|>", "<|im_end|>", "User:", "\nUser:", "user\n" } 
             };
 
             await foreach (var token in _session.ChatAsync(
-                               new ChatHistory.Message(AuthorRole.User, text + "\n<|im_start|>assistant\n"), 
+                               new ChatHistory.Message(AuthorRole.User, text), 
                                inferenceParams))
             {
                 response += token;
@@ -269,9 +269,11 @@ public partial class MainWindow : Window
             cleanText = Regex.Replace(cleanText, @"<app>.*?</app>", "", RegexOptions.Singleline);
             cleanText = Regex.Replace(cleanText, @"<args>.*?</args>", "", RegexOptions.Singleline);
             cleanText = Regex.Replace(cleanText, @"<path>.*?</path>", "", RegexOptions.Singleline);
-            cleanText = Regex.Replace(cleanText, @"<query>.*?</query>", "", RegexOptions.Singleline).Trim();
+            cleanText = Regex.Replace(cleanText, @"<query>.*?</query>", "", RegexOptions.Singleline);
+            cleanText = Regex.Replace(cleanText, @"<url>.*?</url>", "", RegexOptions.Singleline).Trim();
             if (cleanText.StartsWith("Output:")) cleanText = cleanText.Substring(7).Trim();
             if (cleanText.StartsWith("You:")) cleanText = cleanText.Substring(4).Trim();
+            if (cleanText.EndsWith("User:")) cleanText = cleanText.Substring(0, cleanText.Length - 5).Trim();
             
             bool hasAction = response.Contains("<action>");
             
@@ -295,6 +297,7 @@ public partial class MainWindow : Window
                     string param1 = Regex.Match(response, @"<path>(.*?)</path>", RegexOptions.Singleline).Groups[1].Value?.Trim() ?? "";
                     if (string.IsNullOrEmpty(param1)) param1 = Regex.Match(response, @"<app>(.*?)</app>", RegexOptions.Singleline).Groups[1].Value?.Trim() ?? "";
                     if (string.IsNullOrEmpty(param1)) param1 = Regex.Match(response, @"<query>(.*?)</query>", RegexOptions.Singleline).Groups[1].Value?.Trim() ?? "";
+                    if (string.IsNullOrEmpty(param1)) param1 = Regex.Match(response, @"<url>(.*?)</url>", RegexOptions.Singleline).Groups[1].Value?.Trim() ?? "";
                     
                     string param2 = Regex.Match(response, @"<args>(.*?)</args>", RegexOptions.Singleline).Groups[1].Value?.Trim() ?? "";
 
