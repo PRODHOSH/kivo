@@ -23,6 +23,7 @@ public partial class MainWindow : Window
     private LLamaWeights _model;
     private LLamaContext _context;
     private InteractiveExecutor _executor;
+    private StatelessExecutor _classifier;  // stateless intent classifier
     private ChatSession _session;
     private bool _isAiReady = false;
     
@@ -218,24 +219,13 @@ public partial class MainWindow : Window
             _context = _model.CreateContext(parameters);
             _executor = new InteractiveExecutor(_context);
             
+            // Classifier: stateless executor for intent detection only
+            var classifierContext = _model.CreateContext(parameters);
+            _classifier = new StatelessExecutor(_model, parameters);
+
+            // Chat session for conversational replies
             _session = new ChatSession(_executor);
-            string systemPrompt = @"You are Kivo, a helpful Windows desktop assistant. Keep replies short and direct.
-
-RULES:
-- If the user greets you or asks a question, reply with plain text. Do NOT output XML.
-- ONLY use XML action tags when the user explicitly asks to DO something on their computer.
-
-Available actions:
-<action>open_app</action><app>appname</app><args>optional args</args>
-<action>create_folder</action><path>C:\full\path</path>
-<action>open_folder</action><path>C:\full\path</path>
-<action>search_web</action><query>search terms</query>
-<action>open_url</action><url>https://example.com</url>
-
-Examples:
-User: Hello -> Hi! How can I help?
-User: Open VS Code -> <action>open_app</action><app>code</app>
-User: Search for cats -> <action>search_web</action><query>cats</query>";
+            string systemPrompt = "You are Kivo, a friendly Windows desktop AI. Keep replies very short (1-2 sentences max). Never repeat the user's request back to them. No XML tags in your response.";
 
             _session.History.AddMessage(AuthorRole.System, systemPrompt);
 
@@ -295,98 +285,77 @@ User: Search for cats -> <action>search_web</action><query>cats</query>";
 
         try
         {
-            string response = "";
-            var replyBox = AddMessage("Kivo", "");
-            
-            var inferenceParams = new InferenceParams() 
-            { 
-                MaxTokens = 256, 
-                AntiPrompts = new List<string> { "<|eot_id|>", "<|im_end|>", "\nUser:", "User:" } 
-            };
+            var replyBox = AddMessage("Kivo", "Thinking...");
 
-            // Fix ChatSession crash: ensure history alternates User/Assistant
+            // ── STEP 1: Intent classifier (stateless, fast) ──────────────────
+            // Runs a separate stateless prompt that ONLY outputs action XML or the word "none".
+            // This is completely separate from the chat session so the model stays focused.
+            // Build classifier prompt - LLM-based intent classification
+            string classifierPrompt = string.Concat(
+                "<|begin_of_text|><|start_header_id|>system<|end_header_id|>\n",
+                "You are a command intent classifier. Output ONLY valid XML action tags or the single word: none\n\n",
+                "Rules:\n",
+                "- Search/google/look up -> <action>search_web</action><query>SEARCH TERMS</query>\n",
+                "- Open website/URL -> <action>open_url</action><url>URL</url>\n",
+                "- Open app/program -> <action>open_app</action><app>APP NAME</app>\n",
+                "- Create folder -> <action>create_folder</action><path>FOLDER NAME</path>\n",
+                "- Open folder -> <action>open_folder</action><path>FOLDER PATH</path>\n",
+                "- Greetings/questions/conversation -> none\n\n",
+                "Examples:\n",
+                "User: search for cats -> <action>search_web</action><query>cats</query>\n",
+                "User: google the weather -> <action>search_web</action><query>weather</query>\n",
+                "User: open chrome and search laws of motion -> <action>search_web</action><query>laws of motion</query>\n",
+                "User: create a folder called mydocs -> <action>create_folder</action><path>mydocs</path>\n",
+                "User: open notepad -> <action>open_app</action><app>notepad</app>\n",
+                "User: open youtube.com -> <action>open_url</action><url>https://youtube.com</url>\n",
+                "User: hello -> none\n",
+                "User: what time is it -> none\n",
+                "<|eot_id|><|start_header_id|>user<|end_header_id|>\n",
+                text,
+                "<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n"
+            );
+
+            string intentXml = "";
+            var classifierParams = new InferenceParams { MaxTokens = 80, AntiPrompts = new List<string> { "<|eot_id|>", "\n\n", "User:" } };
+            await foreach (var tok in _classifier.InferAsync(classifierPrompt, classifierParams))
+                intentXml += tok;
+            intentXml = intentXml.Trim();
+
+            // ── STEP 2: Chat session for conversational reply ────────────────
+            string chatReply = "";
+            var chatParams = new InferenceParams { MaxTokens = 128, AntiPrompts = new List<string> { "<|eot_id|>", "<|im_end|>", "\nUser:", "User:" } };
+
             var lastMsg = _session.History.Messages.LastOrDefault();
             if (lastMsg != null && lastMsg.AuthorRole == AuthorRole.User)
-            {
                 _session.History.AddMessage(AuthorRole.Assistant, "(ok)");
-            }
 
-            await foreach (var token in _session.ChatAsync(
-                               new ChatHistory.Message(AuthorRole.User, text), 
-                               inferenceParams))
+            await foreach (var token in _session.ChatAsync(new ChatHistory.Message(AuthorRole.User, text), chatParams))
             {
-                response += token;
-                replyBox.Text = response;
+                chatReply += token;
+                // Strip leaked tokens during streaming
+                string display = Regex.Replace(chatReply, @"<\|.*?\|>", "").Trim();
+                replyBox.Text = string.IsNullOrWhiteSpace(display) ? "Thinking..." : display;
                 ChatScrollViewer.ScrollToEnd();
             }
 
-            // Clean response for display
-            string cleanText = response;
-            cleanText = Regex.Replace(cleanText, @"<action>.*?</action>", "", RegexOptions.Singleline);
-            cleanText = Regex.Replace(cleanText, @"<app>.*?</app>", "", RegexOptions.Singleline);
-            cleanText = Regex.Replace(cleanText, @"<args>.*?</args>", "", RegexOptions.Singleline);
-            cleanText = Regex.Replace(cleanText, @"<path>.*?</path>", "", RegexOptions.Singleline);
-            cleanText = Regex.Replace(cleanText, @"<query>.*?</query>", "", RegexOptions.Singleline);
-            cleanText = Regex.Replace(cleanText, @"<url>.*?</url>", "", RegexOptions.Singleline);
-            cleanText = Regex.Replace(cleanText, @"<\|.*?\|>", "", RegexOptions.Singleline); // Strip any leaked special tokens
-            cleanText = cleanText.Trim();
-            if (cleanText.EndsWith("User:")) cleanText = cleanText[..^5].Trim();
-            
-            bool hasAction = response.Contains("<action>");
-            
-            if (hasAction && string.IsNullOrWhiteSpace(cleanText))
-            {
-                replyBox.Text = "On it...";
-            }
-            else if (!string.IsNullOrWhiteSpace(cleanText))
-            {
-                replyBox.Text = cleanText;
-                if (!hasAction) Speak(cleanText); 
-            }
-            else
-            {
-                replyBox.Text = "Done.";
-            }
+            // Clean final chat reply
+            chatReply = Regex.Replace(chatReply, @"<\|.*?\|>", "").Trim();
+            if (chatReply.EndsWith("User:")) chatReply = chatReply[..^5].Trim();
+            replyBox.Text = string.IsNullOrWhiteSpace(chatReply) ? "Got it!" : chatReply;
 
-            // Parse and execute XML actions
-            if (hasAction)
+            // ── STEP 3: Execute intent if classifier found one ───────────────
+            if (!string.IsNullOrWhiteSpace(intentXml) && intentXml != "none" && intentXml.Contains("<action>"))
             {
-                var actionMatch = Regex.Match(response, @"<action>(.*?)</action>", RegexOptions.Singleline);
-                if (actionMatch.Success)
+                string action = ExtractTag(intentXml, "action");
+                string param1 = ExtractTag(intentXml, "query");
+                if (string.IsNullOrEmpty(param1)) param1 = ExtractTag(intentXml, "url");
+                if (string.IsNullOrEmpty(param1)) param1 = ExtractTag(intentXml, "app");
+                if (string.IsNullOrEmpty(param1)) param1 = ExtractTag(intentXml, "path");
+                string param2 = ExtractTag(intentXml, "args");
+
+                if (!string.IsNullOrEmpty(action) && !string.IsNullOrEmpty(param1) && !IsPlaceholder(param1))
                 {
-                    string action = actionMatch.Groups[1].Value.Trim();
-                    
-                    // Extract params in priority order
-                    string param1 = ExtractTag(response, "path");
-                    if (string.IsNullOrEmpty(param1)) param1 = ExtractTag(response, "app");
-                    if (string.IsNullOrEmpty(param1)) param1 = ExtractTag(response, "query");
-                    if (string.IsNullOrEmpty(param1)) param1 = ExtractTag(response, "url");
-                    
-                    string param2 = ExtractTag(response, "args");
-
-                    // Skip template placeholders
-                    if (IsPlaceholder(param1))
-                    {
-                        AddMessage("System", "Kivo couldn't determine what to do. Try being more specific.");
-                    }
-                    else if (!string.IsNullOrEmpty(param1))
-                    {
-                        string displayParam = param1 + (string.IsNullOrEmpty(param2) ? "" : $" ({param2})");
-                        var permission = MessageBox.Show(
-                            $"Kivo wants to:\n\nAction: {action}\nTarget: {displayParam}\n\nAllow?", 
-                            "Kivo", MessageBoxButton.YesNo, MessageBoxImage.Question);
-                        
-                        if (permission == MessageBoxResult.Yes)
-                        {
-                            string result = ActionExecutor.Execute(action, param1, param2);
-                            AddMessage("System", result);
-                            Speak(result); 
-                        }
-                        else
-                        {
-                            AddMessage("System", "Action cancelled.");
-                        }
-                    }
+                    AskPermissionAndExecute(action, param1, param2);
                 }
             }
         }
@@ -416,6 +385,27 @@ User: Search for cats -> <action>search_web</action><query>cats</query>";
             || lower == "https://example.com" || lower == "search terms"
             || lower == "optional args" || lower.Contains("example");
     }
+
+    private void AskPermissionAndExecute(string action, string param1, string? param2)
+    {
+        string displayParam = param1 + (string.IsNullOrEmpty(param2) ? "" : $" ({param2})");
+        var permission = MessageBox.Show(
+            $"Kivo wants to:\n\nAction: {action}\nTarget: {displayParam}\n\nAllow?", 
+            "Kivo", MessageBoxButton.YesNo, MessageBoxImage.Question);
+        
+        if (permission == MessageBoxResult.Yes)
+        {
+            string result = ActionExecutor.Execute(action, param1, param2);
+            AddMessage("System", result);
+            Speak(result); 
+        }
+        else
+        {
+            AddMessage("System", "Action cancelled.");
+        }
+    }
+
+
     
     private TextBlock AddMessage(string sender, string message)
     {
