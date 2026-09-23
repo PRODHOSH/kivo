@@ -13,7 +13,9 @@ using System.Speech.Synthesis;
 using System.Windows.Media.Animation;
 using LLama.Common;
 using LLama;
-using System.Speech.Recognition;
+using Whisper.net;
+using NAudio.Wave;
+
 
 namespace Kivo;
 
@@ -25,8 +27,12 @@ public partial class MainWindow : Window
     private ChatSession _session;
     private bool _isAiReady = false;
     
-    // Speech Recognition
-    private SpeechRecognitionEngine _recognizer;
+    // Whisper
+    private WhisperFactory _whisperFactory;
+    private WhisperProcessor _whisperProcessor;
+    private WaveInEvent _waveIn;
+    private MemoryStream _audioStream;
+    private WaveFileWriter _waveWriter;
     
     private SpeechSynthesizer _synthesizer;
     private bool _isListening = false;
@@ -44,32 +50,12 @@ public partial class MainWindow : Window
     {
         try
         {
+            // Initialize Whisper.net
+            _whisperFactory = WhisperFactory.FromPath(@"d:\kivo\models\ggml-small.en.bin");
+            _whisperProcessor = _whisperFactory.CreateBuilder().WithLanguage("en").Build();
+            
             _synthesizer = new SpeechSynthesizer();
             _synthesizer.SetOutputToDefaultAudioDevice();
-            
-            _recognizer = new SpeechRecognitionEngine(new System.Globalization.CultureInfo("en-US"));
-            _recognizer.LoadGrammar(new DictationGrammar());
-            _recognizer.SetInputToDefaultAudioDevice();
-            
-            _recognizer.SpeechRecognized += (s, e) => 
-            {
-                if (e.Result != null && !string.IsNullOrWhiteSpace(e.Result.Text))
-                {
-                    Dispatcher.Invoke(() => 
-                    {
-                        InputBox.Text = e.Result.Text;
-                        ProcessInput(e.Result.Text);
-                        
-                        // Stop listening after a command is spoken
-                        _isListening = false;
-                        _pulseAnimation.Stop();
-                        DotPulsePanel.Visibility = Visibility.Collapsed;
-                        MicIcon.Visibility = Visibility.Visible;
-                        InputBox.IsReadOnly = false;
-                        _recognizer.RecognizeAsyncCancel();
-                    });
-                }
-            };
         }
         catch (Exception ex)
         {
@@ -88,9 +74,9 @@ public partial class MainWindow : Window
     
     private void MicButton_Click(object sender, RoutedEventArgs e)
     {
-        if (_recognizer == null)
+        if (_whisperProcessor == null)
         {
-            AddMessage("System", "Speech engine failed to initialize.");
+            AddMessage("System", "Whisper AI engine failed to initialize or model is missing.");
             return;
         }
 
@@ -107,7 +93,12 @@ public partial class MainWindow : Window
                 InputBox.Text = "Listening (Click Mic again to stop)...";
                 InputBox.IsReadOnly = true;
                 
-                _recognizer.RecognizeAsync(RecognizeMode.Multiple);
+                _audioStream = new MemoryStream();
+                _waveIn = new WaveInEvent { WaveFormat = new WaveFormat(16000, 1) };
+                _waveWriter = new WaveFileWriter(_audioStream, _waveIn.WaveFormat);
+                
+                _waveIn.DataAvailable += (s, ev) => _waveWriter.Write(ev.Buffer, 0, ev.BytesRecorded);
+                _waveIn.StartRecording();
             }
             else
             {
@@ -117,10 +108,52 @@ public partial class MainWindow : Window
                 DotPulsePanel.Visibility = Visibility.Collapsed;
                 MicIcon.Visibility = Visibility.Visible;
                 
-                InputBox.IsReadOnly = false;
-                InputBox.Text = "";
+                _waveIn?.StopRecording();
+                _waveWriter?.Flush();
+                _audioStream.Position = 0;
                 
-                _recognizer.RecognizeAsyncCancel();
+                InputBox.Text = "Transcribing with Whisper...";
+                
+                Task.Run(async () => 
+                {
+                    string fullText = "";
+                    try
+                    {
+                        await foreach(var result in _whisperProcessor.ProcessAsync(_audioStream))
+                        {
+                            fullText += result.Text;
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        Dispatcher.Invoke(() => AddMessage("System", $"Whisper Error: {ex.Message}"));
+                    }
+                    finally
+                    {
+                        _waveWriter?.Dispose();
+                        _waveIn?.Dispose();
+                        _audioStream?.Dispose();
+                    }
+                    
+                    string finalTrimmedText = fullText.Replace("[BLANK_AUDIO]", "").Replace("(blank audio)", "").Replace("[Silence]", "").Replace("[SILENCE]", "").Trim();
+                    // Filter out common Whisper hallucination triggers if text is basically empty
+                    if (finalTrimmedText.Length < 3 || finalTrimmedText.ToLower().Contains("subtitles by")) finalTrimmedText = "";
+                    
+                    Dispatcher.Invoke(() => 
+                    {
+                        InputBox.IsReadOnly = false;
+                        if (!string.IsNullOrWhiteSpace(finalTrimmedText))
+                        {
+                            InputBox.Text = finalTrimmedText;
+                            ProcessInput(finalTrimmedText);
+                        }
+                        else
+                        {
+                            InputBox.Text = "";
+                            AddMessage("System", "Could not hear any speech clearly.");
+                        }
+                    });
+                });
             }
         }
         catch (Exception ex)
@@ -143,7 +176,7 @@ public partial class MainWindow : Window
     {
         try
         {
-            string modelPath = @"d:\kivo\models\qwen2.5-0.5b-instruct-q4_k_m.gguf";
+            string modelPath = @"d:\kivo\models\Llama-3.2-1B-Instruct.gguf";
             var parameters = new ModelParams(modelPath)
             {
                 ContextSize = 1024,
@@ -155,7 +188,7 @@ public partial class MainWindow : Window
             _executor = new InteractiveExecutor(_context);
             
             _session = new ChatSession(_executor);
-            string systemPrompt = "You are Kivo, a smart Windows AI assistant. IMPORTANT: ONLY output a JSON action block IF the user explicitly asks you to perform a task. If the user just says hello or asks a question, reply with normal text and DO NOT output JSON. Do NOT hallucinate code. Allowed JSON format:\n{\"action\": \"open_app\", \"app\": \"code\", \"args\": \"path/to/folder\"}\n{\"action\": \"create_folder\", \"path\": \"path/to/folder\"}\n{\"action\": \"open_folder\", \"path\": \"path/to/folder\"}\n{\"action\": \"search_web\", \"query\": \"query\"}";
+            string systemPrompt = "You are Kivo, a smart Windows AI assistant. IMPORTANT: ONLY output an XML action block IF the user explicitly asks you to perform a task on their computer. If the user just says hello or asks a question, reply with normal text and DO NOT output XML. Allowed XML formats:\n<action>open_app</action><app>code</app><args>path/to/folder</args>\n<action>create_folder</action><path>path/to/folder</path>\n<action>open_folder</action><path>path/to/folder</path>\n<action>search_web</action><query>query</query>";
             _session.History.AddMessage(AuthorRole.System, systemPrompt);
 
             _isAiReady = true;
@@ -231,13 +264,16 @@ public partial class MainWindow : Window
                 ChatScrollViewer.ScrollToEnd();
             }
 
-            // Scrub JSON from UI
-            string cleanText = Regex.Replace(response, @"```json.*?```", "", RegexOptions.Singleline);
-            cleanText = Regex.Replace(cleanText, @"\{.*?\}", "", RegexOptions.Singleline).Trim();
+            // Scrub XML from UI
+            string cleanText = Regex.Replace(response, @"<action>.*?</action>", "", RegexOptions.Singleline);
+            cleanText = Regex.Replace(cleanText, @"<app>.*?</app>", "", RegexOptions.Singleline);
+            cleanText = Regex.Replace(cleanText, @"<args>.*?</args>", "", RegexOptions.Singleline);
+            cleanText = Regex.Replace(cleanText, @"<path>.*?</path>", "", RegexOptions.Singleline);
+            cleanText = Regex.Replace(cleanText, @"<query>.*?</query>", "", RegexOptions.Singleline).Trim();
             if (cleanText.StartsWith("Output:")) cleanText = cleanText.Substring(7).Trim();
             if (cleanText.StartsWith("You:")) cleanText = cleanText.Substring(4).Trim();
             
-            bool hasJsonAction = Regex.IsMatch(response, @"\{.*?\}", RegexOptions.Singleline);
+            bool hasAction = response.Contains("<action>");
             
             if (string.IsNullOrWhiteSpace(cleanText))
             {
@@ -246,28 +282,25 @@ public partial class MainWindow : Window
             else
             {
                 replyBox.Text = cleanText;
-                if (!hasJsonAction) Speak(cleanText); 
+                if (!hasAction) Speak(cleanText); 
             }
 
-            // Check for JSON actions using Regex
-            var matches = Regex.Matches(response, @"\{[^{}]*\}", RegexOptions.Singleline);
-            foreach (Match match in matches)
+            // Check for XML actions
+            if (hasAction)
             {
-                try
+                var actionMatch = Regex.Match(response, @"<action>(.*?)</action>", RegexOptions.Singleline);
+                if (actionMatch.Success)
                 {
-                    using JsonDocument doc = JsonDocument.Parse(match.Value);
-                    var root = doc.RootElement;
-                    if (root.TryGetProperty("action", out var actionProp))
+                    string action = actionMatch.Groups[1].Value.Trim();
+                    string param1 = Regex.Match(response, @"<path>(.*?)</path>", RegexOptions.Singleline).Groups[1].Value?.Trim() ?? "";
+                    if (string.IsNullOrEmpty(param1)) param1 = Regex.Match(response, @"<app>(.*?)</app>", RegexOptions.Singleline).Groups[1].Value?.Trim() ?? "";
+                    if (string.IsNullOrEmpty(param1)) param1 = Regex.Match(response, @"<query>(.*?)</query>", RegexOptions.Singleline).Groups[1].Value?.Trim() ?? "";
+                    
+                    string param2 = Regex.Match(response, @"<args>(.*?)</args>", RegexOptions.Singleline).Groups[1].Value?.Trim() ?? "";
+
+                    // Prevent hallucinations
+                    if (param1 != "path/to/folder" && param1 != "query")
                     {
-                        string action = actionProp.GetString();
-                        string param1 = root.TryGetProperty("path", out var pathProp) ? pathProp.GetString() : 
-                                        root.TryGetProperty("app", out var appProp) ? appProp.GetString() : 
-                                        root.TryGetProperty("query", out var queryProp) ? queryProp.GetString() : null;
-                        string param2 = root.TryGetProperty("args", out var argsProp) ? argsProp.GetString() : null;
-
-                        // Prevent hallucinations
-                        if (param1 == "absolute_path_here" || param1 == "path/to/folder" || param1 == "empty_folder_path") continue;
-
                         string displayParam = param1 + (string.IsNullOrEmpty(param2) ? "" : $" (Args: {param2})");
                         var permission = MessageBox.Show($"Kivo wants to execute the following action:\n\nAction: {action}\nParameter: {displayParam}\n\nDo you want to allow this?", "Kivo Security Layer", MessageBoxButton.YesNo, MessageBoxImage.Warning);
                         
@@ -284,7 +317,6 @@ public partial class MainWindow : Window
                         }
                     }
                 }
-                catch (JsonException) { /* Not a valid JSON action, ignore */ }
             }
         }
         catch (Exception ex)
