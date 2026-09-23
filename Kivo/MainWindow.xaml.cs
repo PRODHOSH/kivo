@@ -255,8 +255,17 @@ public partial class MainWindow : Window
                 AntiPrompts = new List<string> { "<|eot_id|>", "<|im_end|>", "User:", "\nUser:", "user\n" } 
             };
 
+            // Recover from previous crashes if history is stuck on User
+            if (_session.History.Messages.LastOrDefault()?.AuthorRole == AuthorRole.User)
+            {
+                _session.History.AddMessage(AuthorRole.Assistant, "[Recovered]");
+            }
+
+            // Force Llama 3 assistant header to prevent repetition loops
+            string promptText = text + "<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n\n";
+
             await foreach (var token in _session.ChatAsync(
-                               new ChatHistory.Message(AuthorRole.User, text), 
+                               new ChatHistory.Message(AuthorRole.User, promptText), 
                                inferenceParams))
             {
                 response += token;
