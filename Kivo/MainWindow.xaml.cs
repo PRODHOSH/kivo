@@ -51,7 +51,18 @@ public partial class MainWindow : Window
     {
         try
         {
-            _whisperFactory = WhisperFactory.FromPath(@"d:\kivo\models\ggml-small.en.bin");
+            // Try ggml-small first, fall back to ggml-tiny
+            string[] whisperPaths = {
+                @"d:\kivo\models\ggml-small.en.bin",
+                @"d:\kivo\models\ggml-tiny.en.bin"
+            };
+            string? whisperPath = whisperPaths.FirstOrDefault(File.Exists);
+            if (whisperPath == null)
+            {
+                Dispatcher.Invoke(() => AddMessage("System", "Whisper model not found. Voice input disabled."));
+                return;
+            }
+            _whisperFactory = WhisperFactory.FromPath(whisperPath);
             _whisperProcessor = _whisperFactory.CreateBuilder().WithLanguage("en").Build();
             
             _synthesizer = new SpeechSynthesizer();
@@ -59,7 +70,7 @@ public partial class MainWindow : Window
         }
         catch (Exception ex)
         {
-            System.Diagnostics.Debug.WriteLine($"Speech init error: {ex.Message}");
+            Dispatcher.Invoke(() => AddMessage("System", $"Voice init error: {ex.Message}"));
         }
     }
     
@@ -334,18 +345,34 @@ public partial class MainWindow : Window
                 }
                 else
                 {
-                    // "open X" / "launch X" / "start X" — check against known app map
-                    var openAppMatch = Regex.Match(text, @"^(?:open|launch|start|run)\s+(.+?)(?:\s+(?:for|and|please|now).*)?$", RegexOptions.IgnoreCase);
-                    if (openAppMatch.Success)
+                    // Scan FULL text for known app names — handles:
+                    // "open X", "launch X", "can you open X", "please open X", "hey open X and..."
+                    // Extract what comes after any open/launch/start/run verb
+                    var openVerbMatch = Regex.Match(text,
+                        @"(?:can\s+you\s+|please\s+|could\s+you\s+|hey\s+)?(?:open|launch|start|run)\s+(.+?)(?:\s+(?:for\s+me|please|now|and\s+tell|and\s+show).*)?$",
+                        RegexOptions.IgnoreCase);
+                    if (openVerbMatch.Success)
                     {
-                        string appCandidate = openAppMatch.Groups[1].Value.Trim();
-                        // Check if it matches a known app (strip trailing words like 'app', 'application')
+                        string appCandidate = openVerbMatch.Groups[1].Value.Trim();
                         string appClean = Regex.Replace(appCandidate, @"\s*(app|application|program|software)$", "", RegexOptions.IgnoreCase).Trim();
-                        string resolved = ActionExecutor.ResolveAppName(appClean);
+                        string? resolved = ActionExecutor.ResolveAppName(appClean);
                         if (resolved != null)
                         {
                             preDetectedAction = "open_app";
                             preDetectedParam = appClean;
+                        }
+                    }
+
+                    // Detect question-style search: "what's the weather in Chennai?", "who is X?"
+                    if (preDetectedAction == null)
+                    {
+                        var questionMatch = Regex.Match(text,
+                            @"^(?:what(?:'s|\s+is)|who\s+is|how\s+(?:to|do)|when\s+(?:is|was)|where\s+is|why\s+is|search\s+for)\s+(.+?)\??",
+                            RegexOptions.IgnoreCase);
+                        if (questionMatch.Success)
+                        {
+                            preDetectedAction = "search_web";
+                            preDetectedParam = questionMatch.Groups[1].Value.Trim().TrimEnd('?', '.');
                         }
                     }
                 }
