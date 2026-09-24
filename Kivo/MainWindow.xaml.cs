@@ -223,9 +223,20 @@ public partial class MainWindow : Window
             var classifierContext = _model.CreateContext(parameters);
             _classifier = new StatelessExecutor(_model, parameters);
 
-            // Chat session for conversational replies
+            // Chat session for conversational replies ONLY
             _session = new ChatSession(_executor);
-            string systemPrompt = "You are Kivo, a friendly Windows desktop AI. Keep replies very short (1-2 sentences max). Never repeat the user's request back to them. No XML tags in your response.";
+            string systemPrompt =
+                "You are Kivo, a voice assistant. " +
+                "STRICT RULES - follow exactly:\n" +
+                "1. Reply in 1-2 short sentences MAXIMUM.\n" +
+                "2. For commands (open, search, create, go to): reply ONLY with 'On it!' or 'Sure!' or 'Done!'. Nothing else.\n" +
+                "3. NEVER say what is or isn't installed on the computer.\n" +
+                "4. NEVER report weather, news, time, or any real-world data.\n" +
+                "5. NEVER pretend you ran a command or checked anything.\n" +
+                "6. NEVER say the user is not logged in or needs to install something.\n" +
+                "7. For greetings: reply warmly in 1 sentence.\n" +
+                "8. For questions you cannot answer: say 'I'm not sure about that.'";
+
 
             _session.History.AddMessage(AuthorRole.System, systemPrompt);
 
@@ -321,6 +332,23 @@ public partial class MainWindow : Window
                     preDetectedAction = "open_url";
                     preDetectedParam = url;
                 }
+                else
+                {
+                    // "open X" / "launch X" / "start X" — check against known app map
+                    var openAppMatch = Regex.Match(text, @"^(?:open|launch|start|run)\s+(.+?)(?:\s+(?:for|and|please|now).*)?$", RegexOptions.IgnoreCase);
+                    if (openAppMatch.Success)
+                    {
+                        string appCandidate = openAppMatch.Groups[1].Value.Trim();
+                        // Check if it matches a known app (strip trailing words like 'app', 'application')
+                        string appClean = Regex.Replace(appCandidate, @"\s*(app|application|program|software)$", "", RegexOptions.IgnoreCase).Trim();
+                        string resolved = ActionExecutor.ResolveAppName(appClean);
+                        if (resolved != null)
+                        {
+                            preDetectedAction = "open_app";
+                            preDetectedParam = appClean;
+                        }
+                    }
+                }
             }
 
             // ── STEP 1: LLM Intent classifier ─────────────────────────────────
@@ -369,10 +397,12 @@ public partial class MainWindow : Window
                 ChatScrollViewer.ScrollToEnd();
             }
 
-            // Clean final chat reply
+            // Clean final chat reply — detect and suppress hallucinated placeholder text
             chatReply = Regex.Replace(chatReply, @"<\|.*?\|>", "").Trim();
             if (chatReply.EndsWith("User:")) chatReply = chatReply[..^5].Trim();
-            replyBox.Text = string.IsNullOrWhiteSpace(chatReply) ? "Got it!" : chatReply;
+            // If the reply contains [placeholder] brackets, the model is hallucinating facts — suppress it
+            bool hasPlaceholder = Regex.IsMatch(chatReply, @"\[.{1,30}\]");
+            replyBox.Text = (string.IsNullOrWhiteSpace(chatReply) || hasPlaceholder) ? "Got it!" : chatReply;
 
             // ── STEP 3: Execute intent ───────────────────────────────────────
             string finalAction = "";

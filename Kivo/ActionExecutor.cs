@@ -168,7 +168,31 @@ namespace Kivo
             // Games / fun
             ["steam"]              = "steam",
             ["epic games"]         = "epicgameslauncher",
+            // Weather
+            ["weather"]            = "msnweather:",
+            ["fluent weather"]     = "msnweather:",
+            ["msn weather"]        = "msnweather:",
+            ["windows weather"]    = "msnweather:",
+            // News / info
+            ["news"]               = "bingnews:",
+            ["maps"]               = "bingmaps:",
+            ["bing maps"]          = "bingmaps:",
+            ["clock"]              = "ms-clock:",
+            ["alarms"]             = "ms-clock:",
+            ["sticky notes"]       = "ms-stickynotes:",
+            ["stickies"]           = "ms-stickynotes:",
         };
+
+        /// <summary>Returns the resolved executable/URI for a known app name, or null if not found.</summary>
+        public static string? ResolveAppName(string appName)
+        {
+            if (string.IsNullOrWhiteSpace(appName)) return null;
+            if (AppMap.TryGetValue(appName, out var direct)) return direct;
+            string low = appName.ToLower();
+            var match = AppMap.FirstOrDefault(kv =>
+                low.Contains(kv.Key.ToLower()) || kv.Key.ToLower().Contains(low));
+            return string.IsNullOrEmpty(match.Value) ? null : match.Value;
+        }
 
         public static string Execute(string action, string? param1 = null, string? param2 = null)
         {
