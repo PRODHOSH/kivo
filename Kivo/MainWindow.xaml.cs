@@ -381,18 +381,9 @@ public partial class MainWindow : Window
 
             if (preDetectedAction != null && preDetectedParam != null)
             {
-                if (preDetectedAction == "open_settings")
-                {
-                    // Settings handled directly with the Settings map
-                    string result = ActionExecutor.OpenSettings(preDetectedParam);
-                    AddMessage("System", result);
-                    Speak(result);
-                }
-                else
-                {
-                    finalAction = preDetectedAction;
-                    finalParam = preDetectedParam;
-                }
+                // Route ALL pre-detected actions through the permission layer
+                finalAction = preDetectedAction;
+                finalParam = preDetectedParam ?? "";
             }
             else if (!string.IsNullOrWhiteSpace(intentXml) && intentXml != "none" && intentXml.Contains("<action>"))
             {
@@ -438,21 +429,58 @@ public partial class MainWindow : Window
 
     private void AskPermissionAndExecute(string action, string param1, string? param2)
     {
-        string displayParam = param1 + (string.IsNullOrEmpty(param2) ? "" : $" ({param2})");
-        var permission = MessageBox.Show(
-            $"Kivo wants to:\n\nAction: {action}\nTarget: {displayParam}\n\nAllow?", 
-            "Kivo", MessageBoxButton.YesNo, MessageBoxImage.Question);
+        // Build a human-friendly permission message
+        string friendlyDesc = BuildFriendlyDescription(action, param1);
         
-        if (permission == MessageBoxResult.Yes)
+        // Destructive actions get a warning icon
+        bool isDestructive = action.Contains("shutdown") || action.Contains("restart") 
+                          || action.Contains("lock") || action.Contains("delete");
+        
+        var icon   = isDestructive ? MessageBoxImage.Warning : MessageBoxImage.Question;
+        var result = MessageBox.Show(
+            $"{friendlyDesc}\n\nAllow Kivo to do this?",
+            "Kivo — Permission Required",
+            MessageBoxButton.YesNo,
+            icon);
+
+        if (result == MessageBoxResult.Yes)
         {
-            string result = ActionExecutor.Execute(action, param1, param2);
-            AddMessage("System", result);
-            Speak(result); 
+            // For settings, call OpenSettings directly so the Settings map is used
+            string outcome = action == "open_settings"
+                ? ActionExecutor.OpenSettings(param1)
+                : ActionExecutor.Execute(action, param1, param2);
+
+            AddMessage("System", outcome);
+            Speak(outcome);
         }
         else
         {
-            AddMessage("System", "Action cancelled.");
+            AddMessage("System", "Cancelled.");
         }
+    }
+
+    private static string BuildFriendlyDescription(string action, string param)
+    {
+        string act = action.ToLower().Trim();
+        return act switch
+        {
+            "search_web"       => $"🔍 Search Google for: \"{param}\".",
+            "open_url"         => $"🌐 Open website: {param}",
+            "open_app"         => $"📂 Launch app: {param}",
+            "open_folder"      => $"📁 Open folder: {param}",
+            "create_folder"    => $"🗂 Create folder named: \"{param}\" on your Desktop.",
+            "open_settings"    => string.IsNullOrWhiteSpace(param)
+                                    ? "⚙️ Open Windows Settings."
+                                    : $"⚙️ Open Windows Settings → {char.ToUpper(param[0]) + param[1..]}.",
+            var s when s.Contains("shutdown")  => "⚠️ Shut down your computer in 10 seconds.",
+            var s when s.Contains("restart")   => "⚠️ Restart your computer in 10 seconds.",
+            var s when s.Contains("lock")      => "🔒 Lock your workstation.",
+            var s when s.Contains("sleep")     => "💤 Put your computer to sleep.",
+            var s when s.Contains("screenshot")=> "📸 Open the Snipping Tool to take a screenshot.",
+            var s when s.Contains("volume")    => $"🔊 Change volume: {param}.",
+            var s when s.Contains("mute")      => "🔇 Mute system volume.",
+            _                  => $"Run: {action} → {param}"
+        };
     }
 
 
