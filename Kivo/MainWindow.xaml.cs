@@ -287,35 +287,59 @@ public partial class MainWindow : Window
         {
             var replyBox = AddMessage("Kivo", "Thinking...");
 
-            // ── PRE-CHECK: Extract URL if user explicitly mentions one ────────
-            // The 1B model is bad at extracting URLs reliably; we handle this deterministically.
+            // ── PRE-CHECK: Reliable pattern detection for things the 1B model struggles with ──
             string? preDetectedAction = null;
             string? preDetectedParam = null;
-            
-            // Check for "go to X" / "navigate to X" / "open X.com" type requests
-            var urlInText = Regex.Match(text, @"(?:go\s+to|navigate\s+to|visit|open)\s+((?:https?://|www\.)\S+|\S+\.(?:com|org|io|net|co|in|uk|gov|edu)\S*)", RegexOptions.IgnoreCase);
-            if (urlInText.Success)
+
+            string textLow = text.ToLower();
+
+            // "go to settings > storage" / "open storage settings" / "open settings and go to storage"
+            var settingsKeywords = new[] { "bluetooth", "wifi", "wi-fi", "storage", "display", "sound", "network", "battery",
+                "update", "privacy", "firewall", "startup", "taskbar", "wallpaper", "background", "accounts",
+                "notifications", "power", "apps", "language", "region", "personalization", "accessibility",
+                "lock screen", "themes", "fonts", "keyboard", "mouse", "touchpad", "usb", "gaming",
+                "developer mode", "clipboard", "time", "date", "recovery", "backup", "activation" };
+
+            bool mentionsSettings = textLow.Contains("setting") || textLow.Contains("settings");
+            if (mentionsSettings)
             {
-                preDetectedAction = "open_url";
-                string url = urlInText.Groups[1].Value.Trim().TrimEnd('.', ',');
-                if (!url.StartsWith("http")) url = "https://" + url;
-                preDetectedParam = url;
+                // Find which settings page they want
+                string settingsPage = "";
+                foreach (var kw in settingsKeywords)
+                    if (textLow.Contains(kw)) { settingsPage = kw; break; }
+                preDetectedAction = "open_settings";
+                preDetectedParam = settingsPage; // empty = main settings page
+            }
+            // URL detection: "go to www.pw.com", "open github.com"
+            else
+            {
+                var urlInText = Regex.Match(text, @"(?:go\s+to|navigate\s+to|visit|open)\s+((?:https?://|www\.)\S+|\S+\.(?:com|org|io|net|co|in|uk|gov|edu)\S*)", RegexOptions.IgnoreCase);
+                if (urlInText.Success)
+                {
+                    string url = urlInText.Groups[1].Value.Trim().TrimEnd('.', ',');
+                    if (!url.StartsWith("http")) url = "https://" + url;
+                    preDetectedAction = "open_url";
+                    preDetectedParam = url;
+                }
             }
 
-            // ── STEP 1: LLM Intent classifier (short, focused prompt) ─────────
+            // ── STEP 1: LLM Intent classifier ─────────────────────────────────
             string intentXml = "";
-            
+
             if (preDetectedAction == null)
             {
                 // Only run LLM classifier when we don't already know the intent
                 string classifierPrompt = string.Concat(
                     "<|begin_of_text|><|start_header_id|>system<|end_header_id|>\n",
-                    "Classify user input. Output XML or 'none'. Examples:\n",
+                    "Classify the user command. Output XML or 'none'.\n",
                     "search for X -> <action>search_web</action><query>X</query>\n",
                     "google X -> <action>search_web</action><query>X</query>\n",
                     "open notepad -> <action>open_app</action><app>notepad</app>\n",
-                    "open youtube.com -> <action>open_url</action><url>https://youtube.com</url>\n",
+                    "open docker -> <action>open_app</action><app>docker</app>\n",
+                    "open vs code -> <action>open_app</action><app>vs code</app>\n",
+                    "open spotify -> <action>open_app</action><app>spotify</app>\n",
                     "create folder myfiles -> <action>create_folder</action><path>myfiles</path>\n",
+                    "open downloads folder -> <action>open_folder</action><path>downloads</path>\n",
                     "hello / questions -> none\n",
                     "<|eot_id|><|start_header_id|>user<|end_header_id|>\n",
                     text,
@@ -357,13 +381,21 @@ public partial class MainWindow : Window
 
             if (preDetectedAction != null && preDetectedParam != null)
             {
-                // URL was detected directly from user text — most reliable
-                finalAction = preDetectedAction;
-                finalParam = preDetectedParam;
+                if (preDetectedAction == "open_settings")
+                {
+                    // Settings handled directly with the Settings map
+                    string result = ActionExecutor.OpenSettings(preDetectedParam);
+                    AddMessage("System", result);
+                    Speak(result);
+                }
+                else
+                {
+                    finalAction = preDetectedAction;
+                    finalParam = preDetectedParam;
+                }
             }
             else if (!string.IsNullOrWhiteSpace(intentXml) && intentXml != "none" && intentXml.Contains("<action>"))
             {
-                // LLM classifier found an action
                 finalAction = ExtractTag(intentXml, "action");
                 finalParam = ExtractTag(intentXml, "query");
                 if (string.IsNullOrEmpty(finalParam)) finalParam = ExtractTag(intentXml, "url");
